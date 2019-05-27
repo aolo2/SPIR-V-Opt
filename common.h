@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 
 typedef uint64_t u64;
 typedef uint32_t u32;
@@ -30,11 +31,3 @@ typedef double f64;
     if (_tmp != VK_SUCCESS) printf("%d\n", _tmp);\
     ASSERT((_tmp) == VK_SUCCESS) \
 }
-
-
-// #include <gsl/gsl_matrix.h>
-
-// gsl_matrix_alloc(w, h)
-// gsl_matrix_set(*m, x, y, val)
-// gsl_matrix_get(*m, x, y)
-// gsl_matrix_free(*m)

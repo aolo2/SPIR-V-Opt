@@ -1,4 +1,11 @@
-#define GLFW_INCLUDE_VULKAN
+#include "common.h"
+#include "linmath.h"
+
+#include "data/cube.h"
+
+#include <vulkan/vulkan.h>
+#include <xcb/xcb.h>
+
 #define NUM_SAMPLES VK_SAMPLE_COUNT_1_BIT
 #define NUM_DESCRIPTOR_SETS 1
 #define NUM_SHADER_STAGES 2
@@ -6,14 +13,6 @@
 #define NUM_VIEWPORTS 1
 #define NUM_SCISSORS NUM_VIEWPORTS
 #define FENCE_TIMEOUT 100000000
-
-#include "common.h"
-#include "linmath.h"
-
-#include "data/cube.h"
-
-#include <GLFW/glfw3.h>
-#include <xcb/xcb.h>
 
 struct swapchain_buffer {
     VkImage     image;
@@ -41,19 +40,13 @@ struct vertex_buffer {
 
 static struct {
     VkInstance                        instance;
-    VkApplicationInfo                 application_info;
-    VkInstanceCreateInfo              instance_create_info;
     VkPhysicalDevice                 *gpus;
-    VkDeviceQueueCreateInfo           queue_info;
     VkQueueFamilyProperties          *queue_properties;
     VkDeviceCreateInfo                device_info;
     VkDevice                          device;
     VkCommandPool                     cbp;
-    VkCommandPoolCreateInfo           cbp_info;
     VkCommandBuffer                   command_buffer;
-    VkXcbSurfaceCreateInfoKHR         surface_create_info;
     VkSurfaceKHR                      surface;
-    VkSwapchainCreateInfoKHR          swapchain_create_info;
     VkFormat                          format;
     VkSwapchainKHR                    swapchain;
     VkImage                          *swapchain_images;
@@ -95,8 +88,6 @@ static struct {
     u32 present_queue_family_index;
     u32 queue_family_count;
     u32 gpu_count;
-    f32 queue_priorities[1];
-    const char **instance_extension_names;
     const char **device_extension_names;
     u32 width;
     u32 height;
@@ -237,6 +228,56 @@ memory_type_from_properties(u32 type_bits, VkFlags requirements_mask, u32 *type_
     return(false);
 }
 
+static void
+destroy()
+{
+    vkDestroyPipeline(data.device, data.pipeline, NULL);
+    
+    vkDestroyDescriptorPool(data.device, data.descriptor_pool, NULL);
+    
+    vkDestroyBuffer(data.device, data.vertex.buf, NULL);
+    vkFreeMemory(data.device, data.vertex.mem, NULL);
+    
+    for (u32 i = 0; i < data.swapchain_image_count; ++i) {
+        vkDestroyFramebuffer(data.device, data.framebuffers[i], NULL);
+    }
+    
+    vkDestroyShaderModule(data.device, data.shader_stages[0].module, NULL);
+    vkDestroyShaderModule(data.device, data.shader_stages[1].module, NULL);
+    
+    vkDestroyRenderPass(data.device, data.render_pass, NULL);
+    
+    for (int i = 0; i < NUM_DESCRIPTOR_SETS; ++i) {
+        vkDestroyDescriptorSetLayout(data.device, data.descriptor_layout[i], NULL);
+    }
+    
+    vkDestroyPipelineLayout(data.device, data.pipeline_layout, NULL);
+    
+    vkDestroyBuffer(data.device, data.uniform.buf, NULL);
+    vkFreeMemory(data.device, data.uniform.mem, NULL);
+    
+    vkDestroyImageView(data.device, data.depth.view, NULL);
+    vkDestroyImage(data.device, data.depth.image, NULL);
+    vkFreeMemory(data.device, data.depth.mem, NULL);
+    
+    for (u32 i = 0; i < data.swapchain_image_count; ++i) {
+        vkDestroyImageView(data.device, data.buffers[i].view, NULL);
+    }
+    
+    vkDestroySwapchainKHR(data.device, data.swapchain, NULL);
+    
+    vkFreeCommandBuffers(data.device, data.cbp, 1, &data.command_buffer);
+    vkDestroyCommandPool(data.device, data.cbp, NULL);
+    
+    vkDeviceWaitIdle(data.device);
+    vkDestroyDevice(data.device, NULL);
+    
+    vkDestroySurfaceKHR(data.instance, data.surface, NULL);
+    xcb_destroy_window(data.connection, data.window);
+    xcb_disconnect(data.connection);
+    
+    vkDestroyInstance(data.instance, NULL); 
+}
 
 s32
 main(void)
@@ -244,29 +285,32 @@ main(void)
     // 01. Init instance
     {
         u32 extension_count = 2;
+        const char **instance_extension_names;
+        VkApplicationInfo application_info;
+        VkInstanceCreateInfo instance_create_info;
         
-        data.application_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-        data.application_info.pNext              = NULL;
-        data.application_info.pApplicationName   = "thesis";
-        data.application_info.applicationVersion = 1;
-        data.application_info.pEngineName        = "thesis";
-        data.application_info.engineVersion      = 1;
-        data.application_info.apiVersion         = VK_API_VERSION_1_0;
+        application_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+        application_info.pNext              = NULL;
+        application_info.pApplicationName   = "thesis";
+        application_info.applicationVersion = 1;
+        application_info.pEngineName        = "thesis";
+        application_info.engineVersion      = 1;
+        application_info.apiVersion         = VK_API_VERSION_1_0;
         
-        ASSERT(data.instance_extension_names = malloc(extension_count * sizeof(char *)));
-        ASSERT(data.instance_extension_names[0] = strdup(VK_KHR_SURFACE_EXTENSION_NAME));
-        ASSERT(data.instance_extension_names[1] = strdup(VK_KHR_XCB_SURFACE_EXTENSION_NAME));
+        ASSERT(instance_extension_names = malloc(extension_count * sizeof(char *)));
+        ASSERT(instance_extension_names[0] = strdup(VK_KHR_SURFACE_EXTENSION_NAME));
+        ASSERT(instance_extension_names[1] = strdup(VK_KHR_XCB_SURFACE_EXTENSION_NAME));
         
-        data.instance_create_info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-        data.instance_create_info.pNext                   = NULL;
-        data.instance_create_info.flags                   = 0;
-        data.instance_create_info.pApplicationInfo        = &data.application_info;
-        data.instance_create_info.ppEnabledExtensionNames = data.instance_extension_names;
-        data.instance_create_info.enabledExtensionCount   = extension_count;
-        data.instance_create_info.enabledLayerCount       = 0;
-        data.instance_create_info.ppEnabledLayerNames     = NULL;
+        instance_create_info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        instance_create_info.pNext                   = NULL;
+        instance_create_info.flags                   = 0;
+        instance_create_info.pApplicationInfo        = &application_info;
+        instance_create_info.ppEnabledExtensionNames = instance_extension_names;
+        instance_create_info.enabledExtensionCount   = extension_count;
+        instance_create_info.enabledLayerCount       = 0;
+        instance_create_info.ppEnabledLayerNames     = NULL;
         
-        ASSERT_VK(vkCreateInstance(&data.instance_create_info, NULL, &data.instance));
+        ASSERT_VK(vkCreateInstance(&instance_create_info, NULL, &data.instance));
     } // End of init instance
     
     
@@ -276,39 +320,55 @@ main(void)
         ASSERT(data.gpu_count);
         ASSERT(data.gpus = malloc(data.gpu_count * sizeof(VkPhysicalDevice)));
         ASSERT_VK(vkEnumeratePhysicalDevices(data.instance, &data.gpu_count, data.gpus));
-    } // End of enumerate devices
-    
-    // Init surface and window
-    {
-        create_xcb_window(800, 600); // this inits data.connection and data.window
-        
-        data.surface_create_info.sType      = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
-        data.surface_create_info.pNext      = NULL;
-        data.surface_create_info.connection = data.connection;
-        data.surface_create_info.window     = data.window;
-        
-        data.format = VK_FORMAT_B8G8R8A8_UNORM; // TODO
-        
-        ASSERT_VK(vkCreateXcbSurfaceKHR(data.instance, &data.surface_create_info, NULL, &data.surface));
-    } // End of init surface and window
-    
-    
-    // 03. Init device
-    {
-        u32 extension_count = 1;
         
         vkGetPhysicalDeviceQueueFamilyProperties(data.gpus[0], &data.queue_family_count, NULL);
         ASSERT(data.queue_family_count);
         ASSERT(data.queue_properties = malloc(data.queue_family_count * sizeof(VkQueueFamilyProperties)));
         vkGetPhysicalDeviceQueueFamilyProperties(data.gpus[0], &data.queue_family_count, data.queue_properties);
         
+        vkGetPhysicalDeviceMemoryProperties(data.gpus[0], &data.memory_properties);
+        vkGetPhysicalDeviceProperties(data.gpus[0], &data.gpu_props);
+    } // End of enumerate devices
+    
+    // Init surface, window and swapchain extension
+    {
+        u32 format_count;
+        VkXcbSurfaceCreateInfoKHR surface_create_info;
+        VkSurfaceFormatKHR *surf_formats;
+        
+        create_xcb_window(800, 600); // this inits data.connection and data.window
+        
+        surface_create_info.sType      = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
+        surface_create_info.pNext      = NULL;
+        surface_create_info.connection = data.connection;
+        surface_create_info.window     = data.window;
+        
+        ASSERT_VK(vkCreateXcbSurfaceKHR(data.instance, &surface_create_info, NULL, &data.surface));
         ASSERT(find_graphics_and_present_queues());
         
-        data.queue_priorities[0]         = 0.0f;
-        data.queue_info.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        data.queue_info.pNext            = NULL;
-        data.queue_info.queueCount       = 1;
-        data.queue_info.pQueuePriorities = data.queue_priorities;
+        ASSERT_VK(vkGetPhysicalDeviceSurfaceFormatsKHR(data.gpus[0], data.surface, &format_count, NULL));
+        ASSERT(surf_formats = malloc(format_count * sizeof(VkSurfaceFormatKHR)));
+        ASSERT_VK(vkGetPhysicalDeviceSurfaceFormatsKHR(data.gpus[0], data.surface, &format_count, surf_formats));
+        
+        if (format_count == 1 && surf_formats[0].format == VK_FORMAT_UNDEFINED) {
+            data.format = VK_FORMAT_B8G8R8A8_UNORM;
+        } else {
+            data.format = surf_formats[0].format;
+        }
+    } // End of init surface, window and swapchain extension
+    
+    
+    // 03. Init device
+    {
+        u32 extension_count = 1;
+        f32 queue_priorities[1] = { 0.0f };
+        VkDeviceQueueCreateInfo queue_info;
+        
+        queue_info.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queue_info.pNext            = NULL;
+        queue_info.queueCount       = 1;
+        queue_info.pQueuePriorities = queue_priorities;
+        queue_info.queueFamilyIndex = data.graphics_queue_family_index;
         
         ASSERT(data.device_extension_names = malloc(extension_count * sizeof(char *)));
         ASSERT(data.device_extension_names[0] = strdup(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
@@ -316,9 +376,9 @@ main(void)
         data.device_info.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         data.device_info.pNext                   = NULL;
         data.device_info.queueCreateInfoCount    = 1;
-        data.device_info.pQueueCreateInfos       = &data.queue_info;
+        data.device_info.pQueueCreateInfos       = &queue_info;
         data.device_info.ppEnabledExtensionNames = data.device_extension_names;
-        data.device_info.enabledExtensionCount   = 1;
+        data.device_info.enabledExtensionCount   = extension_count;
         data.device_info.enabledLayerCount       = 0;
         data.device_info.ppEnabledLayerNames     = NULL;
         data.device_info.pEnabledFeatures        = NULL;
@@ -330,13 +390,14 @@ main(void)
     // 04. Init command buffer
     {
         VkCommandBufferAllocateInfo cmd;
+        VkCommandPoolCreateInfo cbp_info;
         
-        data.cbp_info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        data.cbp_info.pNext            = NULL;
-        data.cbp_info.queueFamilyIndex = data.queue_info.queueFamilyIndex;
-        data.cbp_info.flags            = 0;
+        cbp_info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cbp_info.pNext            = NULL;
+        cbp_info.queueFamilyIndex = data.graphics_queue_family_index;
+        cbp_info.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         
-        ASSERT_VK(vkCreateCommandPool(data.device, &data.cbp_info, NULL, &data.cbp));
+        ASSERT_VK(vkCreateCommandPool(data.device, &cbp_info, NULL, &data.cbp));
         
         cmd.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         cmd.pNext              = NULL;
@@ -346,23 +407,27 @@ main(void)
         
         ASSERT_VK(vkAllocateCommandBuffers(data.device, &cmd, &data.command_buffer));
         
-#if 1
-        VkCommandBufferBeginInfo cmd_buf_info;
+        // Begin command buffer
+        {
+            VkCommandBufferBeginInfo cmd_buf_info;
+            
+            cmd_buf_info.sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            cmd_buf_info.pNext            = NULL;
+            cmd_buf_info.flags            = 0;
+            cmd_buf_info.pInheritanceInfo = NULL;
+            
+            ASSERT_VK(vkBeginCommandBuffer(data.command_buffer, &cmd_buf_info));
+        } // End of begin command buffer
         
-        cmd_buf_info.sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        cmd_buf_info.pNext            = NULL;
-        cmd_buf_info.flags            = 0;
-        cmd_buf_info.pInheritanceInfo = NULL;
-        
-        ASSERT_VK(vkBeginCommandBuffer(data.command_buffer, &cmd_buf_info));
-#endif
-        
-        vkGetDeviceQueue(data.device, data.graphics_queue_family_index, 0, &data.graphics_queue);
-        if (data.graphics_queue_family_index == data.present_queue_family_index) {
-            data.present_queue = data.graphics_queue;
-        } else {
-            vkGetDeviceQueue(data.device, data.present_queue_family_index, 0, &data.present_queue);
-        }
+        // Init device queue
+        {
+            vkGetDeviceQueue(data.device, data.graphics_queue_family_index, 0, &data.graphics_queue);
+            if (data.graphics_queue_family_index == data.present_queue_family_index) {
+                data.present_queue = data.graphics_queue;
+            } else {
+                vkGetDeviceQueue(data.device, data.present_queue_family_index, 0, &data.present_queue);
+            }
+        } // End of init device queue
     } // End of init command buffer
     
     
@@ -374,6 +439,7 @@ main(void)
         VkExtent2D swapchain_extent;
         VkSurfaceTransformFlagBitsKHR pre_transform;
         VkCompositeAlphaFlagBitsKHR composite_alpha;
+        VkSwapchainCreateInfoKHR swapchain_create_info;
         
         VkCompositeAlphaFlagBitsKHR composite_alpha_flags[4] = {
             VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
@@ -425,39 +491,42 @@ main(void)
             }
         }
         
-        data.swapchain_create_info.sType                 = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-        data.swapchain_create_info.pNext                 = NULL;
-        data.swapchain_create_info.surface               = data.surface;
-        data.swapchain_create_info.minImageCount         = capabilities.minImageCount;
-        data.swapchain_create_info.imageFormat           = data.format;
-        data.swapchain_create_info.imageExtent.width     = swapchain_extent.width;
-        data.swapchain_create_info.imageExtent.height    = swapchain_extent.height;
-        data.swapchain_create_info.preTransform          = pre_transform;
-        data.swapchain_create_info.compositeAlpha        = composite_alpha;
-        data.swapchain_create_info.imageArrayLayers      = 1;
-        data.swapchain_create_info.presentMode           = VK_PRESENT_MODE_FIFO_KHR;
-        data.swapchain_create_info.oldSwapchain          = VK_NULL_HANDLE;
-        data.swapchain_create_info.clipped               = true;
-        data.swapchain_create_info.imageColorSpace       = VK_COLORSPACE_SRGB_NONLINEAR_KHR;
-        data.swapchain_create_info.imageUsage            = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-        data.swapchain_create_info.imageSharingMode      = VK_SHARING_MODE_EXCLUSIVE;
-        data.swapchain_create_info.queueFamilyIndexCount = 0;
-        data.swapchain_create_info.pQueueFamilyIndices   = NULL;
+        swapchain_create_info.sType                 = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        swapchain_create_info.pNext                 = NULL;
+        swapchain_create_info.surface               = data.surface;
+        swapchain_create_info.minImageCount         = capabilities.minImageCount;
+        swapchain_create_info.imageFormat           = data.format;
+        swapchain_create_info.imageExtent.width     = swapchain_extent.width;
+        swapchain_create_info.imageExtent.height    = swapchain_extent.height;
+        swapchain_create_info.preTransform          = pre_transform;
+        swapchain_create_info.compositeAlpha        = composite_alpha;
+        swapchain_create_info.imageArrayLayers      = 1;
+        swapchain_create_info.presentMode           = VK_PRESENT_MODE_FIFO_KHR;
+        swapchain_create_info.oldSwapchain          = VK_NULL_HANDLE;
+        swapchain_create_info.clipped               = true;
+        swapchain_create_info.imageColorSpace       = VK_COLORSPACE_SRGB_NONLINEAR_KHR;
+        swapchain_create_info.imageUsage            = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        swapchain_create_info.imageSharingMode      = VK_SHARING_MODE_EXCLUSIVE;
+        swapchain_create_info.queueFamilyIndexCount = 0;
+        swapchain_create_info.pQueueFamilyIndices   = NULL;
         
         if (data.graphics_queue_family_index != data.present_queue_family_index) {
-            data.swapchain_create_info.imageSharingMode      = VK_SHARING_MODE_CONCURRENT;
-            data.swapchain_create_info.queueFamilyIndexCount = 2;
-            data.swapchain_create_info.pQueueFamilyIndices   = queue_family_indices;
+            swapchain_create_info.imageSharingMode      = VK_SHARING_MODE_CONCURRENT;
+            swapchain_create_info.queueFamilyIndexCount = 2;
+            swapchain_create_info.pQueueFamilyIndices   = queue_family_indices;
         }
         
-        ASSERT_VK(vkCreateSwapchainKHR(data.device, &data.swapchain_create_info, NULL, &data.swapchain));
+        ASSERT_VK(vkCreateSwapchainKHR(data.device, &swapchain_create_info, NULL, &data.swapchain));
         ASSERT_VK(vkGetSwapchainImagesKHR(data.device, data.swapchain, &data.swapchain_image_count, NULL));
         ASSERT(data.swapchain_images = malloc(data.swapchain_image_count * sizeof(VkImage)));
         ASSERT_VK(vkGetSwapchainImagesKHR(data.device, data.swapchain, &data.swapchain_image_count, data.swapchain_images));
         ASSERT(data.buffers = malloc(data.swapchain_image_count * sizeof(struct swapchain_buffer)));
         
+        struct swapchain_buffer *sc_head = data.buffers;
+        
         for (u32 i = 0; i < data.swapchain_image_count; ++i) {
             VkImageViewCreateInfo color_image_view;
+            struct swapchain_buffer sc_buffer;
             
             data.buffers[i].image = data.swapchain_images[i];
             
@@ -476,10 +545,15 @@ main(void)
             color_image_view.subresourceRange.levelCount     = 1;
             color_image_view.subresourceRange.baseArrayLayer = 0;
             color_image_view.subresourceRange.layerCount     = 1;
+            color_image_view.image                           = data.swapchain_images[i];
+            
+            sc_buffer.image = data.swapchain_images[i];
+            *sc_head++ = sc_buffer;
             
             ASSERT_VK(vkCreateImageView(data.device, &color_image_view, NULL, &data.buffers[i].view));
         }
         
+        data.current_buffer = 0;
     } // End of init swapchain
     
     
@@ -490,7 +564,13 @@ main(void)
         VkMemoryAllocateInfo mem_alloc;
         VkImageViewCreateInfo view_info;
         VkMemoryRequirements mem_reqs;
-        VkFormat depth_format = VK_FORMAT_D16_UNORM;
+        VkFormat depth_format;
+        
+        if (data.depth.format == VK_FORMAT_UNDEFINED) {
+            data.depth.format = VK_FORMAT_D16_UNORM;
+        }
+        
+        depth_format = data.depth.format;
         
         vkGetPhysicalDeviceFormatProperties(data.gpus[0], depth_format, &properties);
         
@@ -506,7 +586,7 @@ main(void)
         image_info.sType                 = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         image_info.pNext                 = NULL;
         image_info.imageType             = VK_IMAGE_TYPE_2D;
-        image_info.format                = VK_FORMAT_D16_UNORM;
+        image_info.format                = depth_format;
         image_info.extent.width          = data.width;
         image_info.extent.height         = data.height;
         image_info.extent.depth          = 1;
@@ -541,13 +621,13 @@ main(void)
         view_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
         view_info.flags                           = 0;
         
-        data.depth.format = depth_format;
+        if (depth_format == VK_FORMAT_D16_UNORM_S8_UINT || depth_format == VK_FORMAT_D24_UNORM_S8_UINT || depth_format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+            view_info.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+        }
         
         ASSERT_VK(vkCreateImage(data.device, &image_info, NULL, &data.depth.image));
         
         vkGetImageMemoryRequirements(data.device, data.depth.image, &mem_reqs);
-        vkGetPhysicalDeviceMemoryProperties(data.gpus[0], &data.memory_properties);
-        vkGetPhysicalDeviceProperties(data.gpus[0], &data.gpu_props);
         
         mem_alloc.allocationSize = mem_reqs.size;
         
@@ -558,7 +638,6 @@ main(void)
         view_info.image = data.depth.image;
         
         ASSERT_VK(vkCreateImageView(data.device, &view_info, NULL, &data.depth.view));
-        ASSERT_VK(vkCreateImage(data.device, &image_info, NULL, &data.depth.image));
     } // End of create a depth buffer
     
     
@@ -573,14 +652,14 @@ main(void)
         vec3 center = { 0, 0, 0 };
         vec3 up     = { 0, -1, 0 };
         
-        mat4x4_perspective(data.projection, 0.785f, (f32) data.width / (f32) data.height, 0.1f, 100.f);
+        mat4x4_perspective(data.projection, 0.785f, (f32) data.width / (f32) data.height, 0.1f, 100.0f);
         mat4x4_look_at(data.view, eye, center, up);
         mat4x4_identity(data.model);
         mat4x4_identity(data.clip);
         
         data.clip[1][1] = -1.0f;
         data.clip[2][2] = 0.5f;
-        data.clip[2][3] = 0.5f;
+        data.clip[3][2] = 0.5f;
         
         mat4x4_mul(data.mvp, data.clip, data.projection);
         mat4x4_mul(data.mvp, data.mvp, data.view);
@@ -634,6 +713,7 @@ main(void)
         descriptor_layout.pNext        = NULL;
         descriptor_layout.bindingCount = 1;
         descriptor_layout.pBindings    = &layout_binding;
+        descriptor_layout.flags        = 0;
         
         ASSERT_VK(vkCreateDescriptorSetLayout(data.device, &descriptor_layout, NULL, data.descriptor_layout));
         
@@ -648,61 +728,13 @@ main(void)
     } // End of init pipeline layout
     
     
-    // 09. Init a descriptor set
-    {
-        VkWriteDescriptorSet writes[1];
-        VkDescriptorPoolSize type_count[1];
-        VkDescriptorSetAllocateInfo alloc_info[1];
-        VkDescriptorPoolCreateInfo descriptor_pool;
-        
-        type_count[0].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        type_count[0].descriptorCount = 1;
-        
-        descriptor_pool.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        descriptor_pool.pNext         = NULL;
-        descriptor_pool.maxSets       = 1;
-        descriptor_pool.poolSizeCount = 1;
-        descriptor_pool.pPoolSizes    = type_count;
-        
-        ASSERT_VK(vkCreateDescriptorPool(data.device, &descriptor_pool, NULL, &data.descriptor_pool));
-        
-        alloc_info[0].sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        alloc_info[0].pNext              = NULL;
-        alloc_info[0].descriptorPool     = data.descriptor_pool;
-        alloc_info[0].descriptorSetCount = NUM_DESCRIPTOR_SETS;
-        alloc_info[0].pSetLayouts        = data.descriptor_layout;
-        
-        ASSERT_VK(vkAllocateDescriptorSets(data.device, alloc_info, data.descriptor_set));
-        
-        writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].pNext           = NULL;
-        writes[0].dstSet          = data.descriptor_set[0];
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        writes[0].pBufferInfo     = &data.uniform.buffer_info;
-        writes[0].dstArrayElement = 0;
-        writes[0].dstBinding      = 0;
-        
-        vkUpdateDescriptorSets(data.device, 1, writes, 0, NULL);
-    } // End of init a descriptor set
-    
-    
     // 10. Init a render pass
     {
-        VkSemaphore image_acquired_semaphore;
-        VkSemaphoreCreateInfo image_acquired_semaphore_create_info;
         VkAttachmentDescription attachments[2];
         VkAttachmentReference color_reference;
         VkAttachmentReference depth_reference;
         VkSubpassDescription subpass;
         VkRenderPassCreateInfo rp_info;
-        
-        image_acquired_semaphore_create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-        image_acquired_semaphore_create_info.pNext = NULL;
-        image_acquired_semaphore_create_info.flags = 0;
-        
-        ASSERT_VK(vkCreateSemaphore(data.device, &image_acquired_semaphore_create_info, NULL, &image_acquired_semaphore));
-        ASSERT_VK(vkAcquireNextImageKHR(data.device, data.swapchain, UINT64_MAX, image_acquired_semaphore, VK_NULL_HANDLE, &data.current_buffer));
         
         attachments[0].format         = data.format;
         attachments[0].samples        = NUM_SAMPLES;
@@ -717,9 +749,9 @@ main(void)
         attachments[1].format         = data.depth.format;
         attachments[1].samples        = NUM_SAMPLES;
         attachments[1].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+        attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
         attachments[1].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
         attachments[1].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         attachments[1].flags          = 0;
@@ -826,11 +858,6 @@ main(void)
         VkBufferCreateInfo buf_info;
         VkMemoryRequirements mem_reqs;
         VkMemoryAllocateInfo alloc_info;
-        VkSemaphore image_acquired_semaphore;
-        VkRenderPassBeginInfo rp_begin;
-        VkSemaphoreCreateInfo image_acquired_semaphore_create_info;
-        const VkDeviceSize offsets[1] = { 0 };
-        VkClearValue clear_values[2];
         
         buf_info.sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         buf_info.pNext                 = NULL;
@@ -852,6 +879,10 @@ main(void)
         ASSERT(memory_type_from_properties(mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &alloc_info.memoryTypeIndex));
         
         ASSERT_VK(vkAllocateMemory(data.device, &alloc_info, NULL, &(data.vertex.mem)));
+        
+        data.vertex.buffer_info.range  = mem_reqs.size;
+        data.vertex.buffer_info.offset = 0;
+        
         ASSERT_VK(vkMapMemory(data.device, data.vertex.mem, 0, mem_reqs.size, 0, (void **) &vertex_data));
         
         memcpy(vertex_data, g_vb_solid_face_colors_Data, sizeof(g_vb_solid_face_colors_Data));
@@ -871,37 +902,46 @@ main(void)
         data.vi_attribs[1].location = 1;
         data.vi_attribs[1].format   = VK_FORMAT_R32G32B32A32_SFLOAT;
         data.vi_attribs[1].offset   = 16;
-        
-        clear_values[0].color.float32[0] = 0.0f;
-        clear_values[0].color.float32[1] = 0.0f;
-        clear_values[0].color.float32[2] = 0.0f;
-        clear_values[0].color.float32[3] = 0.0f;
-        
-        clear_values[1].depthStencil.depth   = 1.0f;
-        clear_values[1].depthStencil.stencil = 0;
-        
-        image_acquired_semaphore_create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-        image_acquired_semaphore_create_info.pNext = NULL;
-        image_acquired_semaphore_create_info.flags = 0;
-        
-        ASSERT_VK(vkCreateSemaphore(data.device, &image_acquired_semaphore_create_info, NULL, &image_acquired_semaphore));
-        ASSERT_VK(vkAcquireNextImageKHR(data.device, data.swapchain, UINT64_MAX, image_acquired_semaphore, VK_NULL_HANDLE, &data.current_buffer));
-        
-        rp_begin.sType                    = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rp_begin.pNext                    = NULL;
-        rp_begin.renderPass               = data.render_pass;
-        rp_begin.framebuffer              = data.framebuffers[data.current_buffer];
-        rp_begin.renderArea.offset.x      = 0;
-        rp_begin.renderArea.offset.y      = 0;
-        rp_begin.renderArea.extent.width  = data.width;
-        rp_begin.renderArea.extent.height = data.height;
-        rp_begin.clearValueCount          = 2;
-        rp_begin.pClearValues             = clear_values;
-        
-        vkCmdBeginRenderPass(data.command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindVertexBuffers(data.command_buffer, 0, 1, &data.vertex.buf, offsets);
-        vkCmdEndRenderPass(data.command_buffer);
     } // End of init vertex buffer
+    
+    
+    // 09. Init a descriptor pool and a descriptor set
+    {
+        VkWriteDescriptorSet writes[1];
+        VkDescriptorPoolSize type_count[1];
+        VkDescriptorSetAllocateInfo alloc_info[1];
+        VkDescriptorPoolCreateInfo descriptor_pool;
+        
+        type_count[0].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        type_count[0].descriptorCount = 1;
+        
+        descriptor_pool.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        descriptor_pool.pNext         = NULL;
+        descriptor_pool.maxSets       = 1;
+        descriptor_pool.poolSizeCount = 1;
+        descriptor_pool.pPoolSizes    = type_count;
+        
+        ASSERT_VK(vkCreateDescriptorPool(data.device, &descriptor_pool, NULL, &data.descriptor_pool));
+        
+        alloc_info[0].sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        alloc_info[0].pNext              = NULL;
+        alloc_info[0].descriptorPool     = data.descriptor_pool;
+        alloc_info[0].descriptorSetCount = NUM_DESCRIPTOR_SETS;
+        alloc_info[0].pSetLayouts        = data.descriptor_layout;
+        
+        ASSERT_VK(vkAllocateDescriptorSets(data.device, alloc_info, data.descriptor_set));
+        
+        writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].pNext           = NULL;
+        writes[0].dstSet          = data.descriptor_set[0];
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[0].pBufferInfo     = &data.uniform.buffer_info;
+        writes[0].dstArrayElement = 0;
+        writes[0].dstBinding      = 0;
+        
+        vkUpdateDescriptorSets(data.device, 1, writes, 0, NULL);
+    } // End of init a descriptor pool and a descriptor set
     
     
     // 14. Init pipeline
@@ -922,7 +962,7 @@ main(void)
         
         dynamic_state.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
         dynamic_state.pNext             = NULL;
-        dynamic_state.pDynamicStates    =  dynamic_state_enables;
+        dynamic_state.pDynamicStates    = dynamic_state_enables;
         dynamic_state.dynamicStateCount = 0;
         
         vi.sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -1090,7 +1130,14 @@ main(void)
         data.viewport.x        = 0;
         data.viewport.y        = 0;
         
+        data.scissor.extent.width  = data.width;
+        data.scissor.extent.height = data.height;
+        data.scissor.offset.x      = 0;
+        data.scissor.offset.y      = 0;
+        
         vkCmdSetViewport(data.command_buffer, 0, NUM_VIEWPORTS, &data.viewport);
+        vkCmdSetScissor(data.command_buffer, 0, NUM_SCISSORS, &data.scissor);
+        
         vkCmdDraw(data.command_buffer, 12 * 3, 1, 0, 0);
         vkCmdEndRenderPass(data.command_buffer);
         
@@ -1134,13 +1181,15 @@ main(void)
         }
         
         ASSERT_VK(vkQueuePresentKHR(data.present_queue, &present));
+        
+        vkDestroySemaphore(data.device, image_acquired_semaphore, NULL);
+        vkDestroyFence(data.device, draw_fence, NULL);
     } // End of draw cube
     
     
-    vkFreeCommandBuffers(data.device, data.cbp, 1, &data.command_buffer);
-    vkDestroyCommandPool(data.device, data.cbp, NULL);
-    vkDestroyDevice(data.device, NULL);
-    vkDestroyInstance(data.instance, NULL);
+    sleep(1);
+    
+    destroy();
     
     return(0);
 }
