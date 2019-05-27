@@ -11,7 +11,7 @@ RELEASE_CFLAGS = -O2
 CFLAGS = $(DEBUG_CFLAGS) -DVK_USE_PLATFORM_XCB_KHR
 BUILD_PATH = $(DEBUG_BUILD_PATH)
 
-LDFLAGS = -L./1.1.85.0/lib `pkg-config --static --libs glfw3` `pkg-config --cflags --libs xcb` -lvulkan
+LDFLAGS = -L./1.1.85.0/lib `pkg-config --static --libs glfw3` `pkg-config --cflags --libs xcb` -lvulkan -lpthread
 INCLUDE = -I./1.1.85.0/x86_64/include
 
 all:
