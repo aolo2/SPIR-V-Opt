@@ -70,6 +70,8 @@ static struct {
     VkRect2D                          scissor;
     VkQueue                           graphics_queue;
     VkQueue                           present_queue;
+    VkCommandBufferBeginInfo          cmd_buf_info;
+    VkMemoryRequirements              umem_reqs;
     
     xcb_connection_t           *connection;
     xcb_screen_t               *screen;
@@ -82,6 +84,7 @@ static struct {
     mat4x4 clip;
     mat4x4 mvp;
     
+    u8 *ubuffer_data;
     u32 current_buffer;
     u32 swapchain_image_count;
     u32 graphics_queue_family_index;
@@ -92,6 +95,9 @@ static struct {
     u32 width;
     u32 height;
 } data;
+
+static const u32 TARGET_FRAMERATE = 60;
+static const f32 TARGET_FRAMETIME = 1000.0f / (f32) TARGET_FRAMERATE;
 
 static u32 *
 get_binary(const char *filename, u32 *size)
@@ -244,14 +250,7 @@ init_pipeline()
     VkGraphicsPipelineCreateInfo pipeline;
     
 #if 1
-    VkCommandBufferBeginInfo cmd_buf_info;
-    
-    cmd_buf_info.sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    cmd_buf_info.pNext            = NULL;
-    cmd_buf_info.flags            = 0;
-    cmd_buf_info.pInheritanceInfo = NULL;
-    
-    ASSERT_VK(vkBeginCommandBuffer(data.command_buffer, &cmd_buf_info));
+    ASSERT_VK(vkBeginCommandBuffer(data.command_buffer, &data.cmd_buf_info));
 #endif
     
     memset(dynamic_state_enables, 0x00, sizeof(dynamic_state_enables));
@@ -415,6 +414,8 @@ draw_cube()
     rp_begin.clearValueCount          = 2;
     rp_begin.pClearValues             = clear_values;
     
+    ASSERT_VK(vkBeginCommandBuffer(data.command_buffer, &data.cmd_buf_info));
+    
     vkCmdBeginRenderPass(data.command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(data.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, data.pipeline);
     vkCmdBindDescriptorSets(data.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, data.pipeline_layout, 0, NUM_DESCRIPTOR_SETS, data.descriptor_set, 0, NULL);
@@ -499,6 +500,15 @@ rebuild_fragment_shader()
     module_create_info.pCode    = fs_words;
     
     ASSERT_VK(vkCreateShaderModule(data.device, &module_create_info, NULL, &data.shader_stages[1].module));
+}
+
+static void
+update_uniform_data(u32 mem_reqs_size)
+{
+    ASSERT_VK(vkMapMemory(data.device, data.uniform.mem, 0, mem_reqs_size, 0, (void **) &data.ubuffer_data));
+    memcpy(data.ubuffer_data, data.mvp, sizeof(data.mvp));
+    vkUnmapMemory(data.device, data.uniform.mem);
+    ASSERT_VK(vkBindBufferMemory(data.device, data.uniform.buf, data.uniform.mem, 0));
 }
 
 static void
@@ -682,14 +692,12 @@ main(void)
         
         // Begin command buffer
         {
-            VkCommandBufferBeginInfo cmd_buf_info;
+            data.cmd_buf_info.sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            data.cmd_buf_info.pNext            = NULL;
+            data.cmd_buf_info.flags            = 0;
+            data.cmd_buf_info.pInheritanceInfo = NULL;
             
-            cmd_buf_info.sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            cmd_buf_info.pNext            = NULL;
-            cmd_buf_info.flags            = 0;
-            cmd_buf_info.pInheritanceInfo = NULL;
-            
-            ASSERT_VK(vkBeginCommandBuffer(data.command_buffer, &cmd_buf_info));
+            ASSERT_VK(vkBeginCommandBuffer(data.command_buffer, &data.cmd_buf_info));
         } // End of begin command buffer
         
         // Init device queue
@@ -916,9 +924,7 @@ main(void)
     
     // 07. Create a uniform buffer
     { 
-        u8 *buffer_data;
         VkBufferCreateInfo buf_info;
-        VkMemoryRequirements mem_reqs;
         VkMemoryAllocateInfo alloc_info;
         
         vec3 eye    = { -5, 3, -10 };
@@ -949,20 +955,17 @@ main(void)
         
         ASSERT_VK(vkCreateBuffer(data.device, &buf_info, NULL, &data.uniform.buf));
         
-        vkGetBufferMemoryRequirements(data.device, data.uniform.buf, &mem_reqs);
+        vkGetBufferMemoryRequirements(data.device, data.uniform.buf, &data.umem_reqs);
         
         alloc_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         alloc_info.pNext           = NULL;
         alloc_info.memoryTypeIndex = 0;
-        alloc_info.allocationSize  = mem_reqs.size;
+        alloc_info.allocationSize  = data.umem_reqs.size;
         
-        ASSERT(memory_type_from_properties(mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &alloc_info.memoryTypeIndex));
+        ASSERT(memory_type_from_properties(data.umem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &alloc_info.memoryTypeIndex));
         ASSERT_VK(vkAllocateMemory(data.device, &alloc_info, NULL, &(data.uniform.mem)));
-        ASSERT_VK(vkMapMemory(data.device, data.uniform.mem, 0, mem_reqs.size, 0, (void **) &buffer_data));
         
-        memcpy(buffer_data, data.mvp, sizeof(data.mvp));
-        vkUnmapMemory(data.device, data.uniform.mem);
-        ASSERT_VK(vkBindBufferMemory(data.device, data.uniform.buf, data.uniform.mem, 0));
+        update_uniform_data(data.umem_reqs.size);
         
         data.uniform.buffer_info.buffer = data.uniform.buf;
         data.uniform.buffer_info.offset = 0;
@@ -1218,9 +1221,39 @@ main(void)
     } // End of init a descriptor pool and a descriptor set
     
     init_pipeline();
-    draw_cube();
     
-    sleep(1);
+    struct timespec frametime_beg;
+    struct timespec frametime_end;
+    
+    u32 fn = 0;
+    
+    while (true) {
+        clock_gettime(CLOCK_MONOTONIC, &frametime_beg);
+        
+        mat4x4_identity(data.model);
+        mat4x4_rotate_Y(data.model, data.model, (f32) fn / 100);
+        mat4x4_mul(data.mvp, data.clip, data.projection);
+        mat4x4_mul(data.mvp, data.mvp, data.view);
+        mat4x4_mul(data.mvp, data.mvp, data.model);
+        
+        update_uniform_data(data.umem_reqs.size);
+        draw_cube();
+        
+        clock_gettime(CLOCK_MONOTONIC, &frametime_end);
+        
+        s64 frametime_nsec = (frametime_end.tv_nsec + frametime_end.tv_sec * 1000000000) 
+            - (frametime_beg.tv_nsec + frametime_beg.tv_sec * 1000000000);
+        
+        s64 frametime_msec = frametime_nsec / 1000000;
+        s32 frametime_delta = TARGET_FRAMETIME - frametime_msec;
+        
+        if (frametime_delta > 0) {
+            //printf("sleeping for %d msec\n", frametime_delta);
+            usleep(frametime_delta * 1000);
+        }
+        
+        ++fn;
+    }
     
     rebuild_fragment_shader();
     init_pipeline();
